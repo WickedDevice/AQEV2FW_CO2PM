@@ -16,6 +16,7 @@
 #include <TinyGPS.h>
 #include <SoftwareSerial.h>
 #include <K30.h>
+#include <PMSX003.h>
 #include <jsmn.h>
 #include <SoftReset.h>
 
@@ -60,6 +61,12 @@ TinyGPS gps;
 SoftwareSerial gpsSerial(18, 18); // RX, TX (we'll never use tx functions)
 SoftwareSerial co2Serial(9, 10);  // RX, TX
 K30 k30(&co2Serial);
+
+SoftwareSerial pmsx003Serial_2(A7, A5);  // RX, TX
+SoftwareSerial pmsx003Serial_1(A4, A5);  // RX, TX
+PMSX003 pmsx003_1(&pmsx003Serial_1);
+PMSX003 pmsx003_2(&pmsx003Serial_2);
+
 int sensor_enable = 17;
 
 boolean gps_disabled = false;
@@ -87,10 +94,19 @@ float reported_humidity_offset_percent = 0.0f;
 float temperature_degc = 0.0f;
 float relative_humidity_percent = 0.0f;
 float co2_ppm = 0.0f;
+float pm1p0_ugpm3 = 0.0f;
+float pm2p5_ugpm3 = 0.0f;
+float pm10p0_ugpm3 = 0.0f;
 
 float instant_temperature_degc = 0.0f;
 float instant_humidity_percent = 0.0f;
 float instant_co2_ppm = 0.0f;
+float instant_pm1p0_ugpm3_a = 0.0f;
+float instant_pm2p5_ugpm3_a = 0.0f;
+float instant_pm10p0_ugpm3_a = 0.0f;
+float instant_pm1p0_ugpm3_b = 0.0f;
+float instant_pm2p5_ugpm3_b = 0.0f;
+float instant_pm10p0_ugpm3_b = 0.0f;
 
 float gps_latitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float gps_longitude = TinyGPS::GPS_INVALID_F_ANGLE;
@@ -101,11 +117,14 @@ float user_latitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float user_longitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float user_altitude = TinyGPS::GPS_INVALID_F_ALTITUDE;
 
-#define MAX_SAMPLE_BUFFER_DEPTH (240) // 20 minutes @ 5 second resolution
+#define MAX_SAMPLE_BUFFER_DEPTH (120) // 10 minutes @ 5 second resolution
 #define CO2_SAMPLE_BUFFER         (0)
 #define TEMPERATURE_SAMPLE_BUFFER (1)
 #define HUMIDITY_SAMPLE_BUFFER    (2)
-#define NUM_SAMPLE_BUFFERS        (3)
+#define PM1P0_SAMPLE_BUFFER       (3)
+#define PM2P5_SAMPLE_BUFFER       (4)
+#define PM10P0_SAMPLE_BUFFER      (5)
+#define NUM_SAMPLE_BUFFERS        (6)
 float sample_buffer[NUM_SAMPLE_BUFFERS][MAX_SAMPLE_BUFFER_DEPTH] = {0};
 uint16_t sample_buffer_idx = 0;
 
@@ -125,6 +144,7 @@ jsmntok_t json_tokens[21];
 boolean temperature_ready = false;
 boolean humidity_ready = false;
 boolean co2_ready = false;
+boolean particulate_ready = false;
 
 boolean init_sht25_ok = false;
 boolean init_spi_flash_ok = false;
@@ -210,11 +230,17 @@ uint8_t mode = MODE_OPERATIONAL;
 #define EEPROM_USER_LOCATION_EN   (EEPROM_USER_LONGITUDE_DEG - 1)        // 1 means user location supercedes GPS location, anything else means GPS or bust
 #define EEPROM_2_2_0_SAMPLING_UPD (EEPROM_USER_LOCATION_EN - 1)          // 1 means to sampling parameter default changes have been applied
 #define EEPROM_DISABLE_SOFTAP     (EEPROM_2_2_0_SAMPLING_UPD - 1)        // 1 means to disable softap behavior
+#define EEPROM_PM1P0_CAL_OFFSET   (EEPROM_DISABLE_SOFTAP - 4)            // offset value for PM1P0 in ug/m^3
+#define EEPROM_PM2P5_CAL_OFFSET   (EEPROM_PM1P0_CAL_OFFSET - 4)          // offset value for PM2P5 in ug/m^3
+#define EEPROM_PM10P0_CAL_OFFSET  (EEPROM_PM2P5_CAL_OFFSET - 4)          // offset value for PM10P0 in ug/m^3
 //  /\
 //   L Add values up here by subtracting offsets to previously added values
 //   * ... and make sure the addresses don't collide and start overlapping!
 //   T Add values down here by adding offsets to previously added values
 //  \/
+#define EEPROM_BACKUP_PM10P0_CAL_OFFSET  (EEPROM_BACKUP_PM2P5_CAL_OFFSET + 4)
+#define EEPROM_BACKUP_PM2P5_CAL_OFFSET   (EEPROM_BACKUP_PM1P0_CAL_OFFSET + 4)
+#define EEPROM_BACKUP_PM1P0_CAL_OFFSET   (EEPROM_BACKUP_NTP_TZ_OFFSET_HRS + 4)
 #define EEPROM_BACKUP_NTP_TZ_OFFSET_HRS  (EEPROM_BACKUP_HUMIDITY_OFFSET + 4)
 #define EEPROM_BACKUP_HUMIDITY_OFFSET    (EEPROM_BACKUP_TEMPERATURE_OFFSET + 4)
 #define EEPROM_BACKUP_TEMPERATURE_OFFSET (EEPROM_BACKUP_PRIVATE_KEY + 32)
@@ -240,6 +266,7 @@ uint8_t mode = MODE_OPERATIONAL;
 #define BACKUP_STATUS_MAC_ADDRESS_BIT             (7)
 #define BACKUP_STATUS_MQTT_PASSSWORD_BIT          (6)
 #define BACKUP_STATUS_CO2_CALIBRATION_BIT         (5)
+#define BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT (4)
 #define BACKUP_STATUS_PRIVATE_KEY_BIT             (3)
 #define BACKUP_STATUS_TEMPERATURE_CALIBRATION_BIT (2)
 #define BACKUP_STATUS_HUMIDITY_CALIBRATION_BIT    (1)
@@ -294,6 +321,9 @@ void set_user_latitude(char * arg);
 void set_user_longitude(char * arg);
 void set_user_location_enable(char * arg);
 void set_softap_enable(char * arg);
+void set_pm1p0_offset(char * arg);
+void set_pm2p5_offset(char * arg);
+void set_pm10p0_offset(char * arg);
 
 // Note to self:
 //   When implementing a new parameter, ask yourself:
@@ -354,6 +384,9 @@ const char cmd_string_usr_lat[] PROGMEM     = "latitude   ";
 const char cmd_string_usr_lng[] PROGMEM     = "longitude  ";
 const char cmd_string_usr_loc_en[] PROGMEM  = "location   ";
 const char cmd_string_softap_en[] PROGMEM   = "softap     ";
+const char cmd_string_pm1p0_off[] PROGMEM   = "pm1p0_off  ";
+const char cmd_string_pm2p5_off[] PROGMEM   = "pm2p5_off  ";
+const char cmd_string_pm10p0_off[] PROGMEM  = "pm10p0_off ";
 const char cmd_string_null[] PROGMEM        = "";
 
 PGM_P const commands[] PROGMEM = {
@@ -399,6 +432,9 @@ PGM_P const commands[] PROGMEM = {
   cmd_string_usr_lng,
   cmd_string_usr_loc_en,
   cmd_string_softap_en,
+  cmd_string_pm1p0_off,
+  cmd_string_pm2p5_off,
+  cmd_string_pm10p0_off,
   cmd_string_null
 };
 
@@ -445,6 +481,9 @@ void (*command_functions[])(char * arg) = {
   set_user_longitude,
   set_user_location_enable,
   set_softap_enable,
+  set_pm1p0_offset,
+  set_pm2p5_offset,
+  set_pm10p0_offset,
   0
 };
 
@@ -836,7 +875,7 @@ void setup() {
     if(!integrity_check_passed){
       Serial.println(F("Error: Config Integrity Check Failed after checkForFirmwareUpdates"));
       setLCD_P(PSTR("CONFIG INTEGRITY"
-                    "  CHECK FAILED  "));                    
+                    "  CHECK FAILED  "));
       for(;;){
         // prevent automatic reset
         delay(1000);
@@ -892,7 +931,7 @@ void setup() {
   }
 
   resumeGpsProcessing();
-  backlightOff();  
+  backlightOff();
 }
 
 void loop() {
@@ -935,6 +974,7 @@ void loop() {
     collectCO2();
     collectTemperature();
     collectHumidity();
+    collectParticulate();
     advanceSampleBufferIndex();
   }
 
@@ -988,9 +1028,9 @@ void init_firmware_version(void){
     AQEV2FW_PATCH_VERSION);
 }
 
-void resetCO2Sensor(){  
-  digitalWrite(sensor_enable, LOW); 
-  delay(1000);  
+void resetSensors(){
+  digitalWrite(sensor_enable, LOW);
+  delay(1000);
   watchdogForceReset();
 }
 
@@ -1013,9 +1053,9 @@ void initEsp8266(void){
 
 void initializeHardware(void) {
   // turn on the co2 sensor
-  pinMode(sensor_enable, OUTPUT);  
+  pinMode(sensor_enable, OUTPUT);
   digitalWrite(sensor_enable, HIGH);
-  
+
   Serial.begin(115200);
   Serial1.begin(115200);
 
@@ -1028,7 +1068,7 @@ void initializeHardware(void) {
 
   Serial.println(F(" +------------------------------------+"));
   Serial.println(F(" |   Welcome to Air Quality Egg 2.0   |"));
-  Serial.println(F(" |         CO2 Sensor Suite           |"));
+  Serial.println(F(" |   CO2 / Particulate Sensor Suite   |"));
   Serial.print(F(" |       Firmware Version "));
   Serial.print(firmware_version);
   Serial.println(F("       |"));
@@ -1110,7 +1150,7 @@ void initializeHardware(void) {
   updateLCD(tmp, 1);
 
   delay(1000);
-  // Initialize Tiny Watchdog  
+  // Initialize Tiny Watchdog
   Serial.print(F("Info: Tiny Watchdog Initialization..."));
   watchdogInitialize();
   Serial.println(F("OK."));
@@ -1179,7 +1219,7 @@ void initializeHardware(void) {
   SUCCESS_MESSAGE_DELAY(); // don't race past the splash screen, and give watchdog some breathing room
   initEsp8266();
 
-  updateLCD("CO2", 0);
+  updateLCD("CO2/PARTICULATE", 0);
   updateLCD("MODEL", 1);
   SUCCESS_MESSAGE_DELAY();
 
@@ -1189,6 +1229,11 @@ void initializeHardware(void) {
   // must be some source of constructor
   pinMode(9, INPUT_PULLUP);
   pinMode(10, OUTPUT);
+
+  // put the same thing in for the particulate sensors
+  pinMode(A4, INPUT_PULLUP);
+  pinMode(A7, INPUT_PULLUP);
+  pinMode(A5, OUTPUT);
 
   // put the same thing in for the GPS pins
   // just to be on the safe side
@@ -1252,7 +1297,7 @@ void initializeNewConfigSettings(void){
     configInject("softap enable\r");
 
     // only apply the sampling update to CO2 eggs if their sampling interval is currently 5 seconds
-    if(eeprom_read_word((uint16_t * ) EEPROM_SAMPLING_INTERVAL) == 5){       
+    if(eeprom_read_word((uint16_t * ) EEPROM_SAMPLING_INTERVAL) == 5){
       configInject("sampling 5, 60, 60\r");
     }
     eeprom_write_byte((uint8_t *) EEPROM_2_2_0_SAMPLING_UPD, 1);
@@ -1905,6 +1950,15 @@ void print_eeprom_value(char * arg) {
   else if (strncmp(arg, "co2_off", 7) == 0) {
     print_eeprom_float((const float *) EEPROM_CO2_CAL_OFFSET);
   }
+  else if(strncmp(arg, "pm1p0_off", 9) == 0){
+    print_eeprom_float((const float *) EEPROM_PM1P0_CAL_OFFSET);
+  }
+  else if(strncmp(arg, "pm2p5_off", 9) == 0){
+    print_eeprom_float((const float *) EEPROM_PM2P5_CAL_OFFSET);
+  }
+  else if(strncmp(arg, "pm10p0_off", 9) == 0){
+    print_eeprom_float((const float *) EEPROM_PM10P0_CAL_OFFSET);
+  }
   else if(strncmp(arg, "mqttsrv", 7) == 0) {
     print_eeprom_string((const char *) EEPROM_MQTT_SERVER_NAME);
   }
@@ -2167,6 +2221,7 @@ void restore(char * arg) {
     configInject("restore updatefile\r");
     configInject("restore key\r");
     configInject("restore co2\r");
+    configInject("restore particulate\r");
     configInject("restore mac\r");
 
     eeprom_write_block(blank, (void *) EEPROM_SSID, 32); // clear the SSID
@@ -2251,6 +2306,20 @@ void restore(char * arg) {
 
     eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_CO2_CAL_OFFSET, 4);
     eeprom_write_block(tmp, (void *) EEPROM_CO2_CAL_OFFSET, 4);
+  }
+  else if (strncmp("particulate", arg, 11) == 0) {
+    if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT)) {
+      Serial.println(F("Error: Particulate calibration must be backed up  "));
+      Serial.println(F("       prior to executing a 'restore'."));
+      return;
+    }
+
+    eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM1P0_CAL_OFFSET, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_PM1P0_CAL_OFFSET, 4);
+    eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM2P5_CAL_OFFSET, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_PM2P5_CAL_OFFSET, 4);
+    eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM10P0_CAL_OFFSET, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_PM10P0_CAL_OFFSET, 4);        
   }
   else if (strncmp("temp_off", arg, 8) == 0) {
     if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_TEMPERATURE_CALIBRATION_BIT)) {
@@ -2939,12 +3008,12 @@ void printDirectory(File dir, int numTabs) {
        // no more files
        break;
      }
-     
+
      char tmp[16] = {0};
-     entry.getName(tmp, 16);          
-     if(tmp[0] != '.'){                 
+     entry.getName(tmp, 16);
+     if(tmp[0] != '.'){
        Serial.print(tmp);
-  
+
        for (uint8_t i=0; i<numTabs; i++) {
          Serial.print(F("\t"));
        }
@@ -3556,6 +3625,18 @@ void set_ntp_timezone_offset(char * arg){
 
 void set_co2_offset(char * arg) {
   set_float_param(arg, (float *) EEPROM_CO2_CAL_OFFSET, 0);
+}
+
+void set_pm1p0_offset(char * arg){
+  set_float_param(arg, (float *) EEPROM_PM1P0_CAL_OFFSET, 0);
+}
+
+void set_pm2p5_offset(char * arg){
+  set_float_param(arg, (float *) EEPROM_PM2P5_CAL_OFFSET, 0);
+}
+
+void set_pm10p0_offset(char * arg){
+  set_float_param(arg, (float *) EEPROM_PM10P0_CAL_OFFSET, 0);
 }
 
 void set_reported_temperature_offset(char * arg) {
@@ -5075,7 +5156,7 @@ void addSample(uint8_t sample_type, float value){
 
 void collectCO2(void){
   //Serial.print("CO2:");
-  
+
   if(k30.getSample(&instant_co2_ppm)){
     //Serial.print(instant_co2_ppm, 1);
     addSample(CO2_SAMPLE_BUFFER, instant_co2_ppm);
@@ -5086,11 +5167,36 @@ void collectCO2(void){
   else{
     Serial.println(F("Error: Failed to communicate with CO2 sensor, restarting"));
     Serial.flush();
-//    resetCO2Sensor();
     watchdogForceReset();    // TODO: uncomment this
   }
+
+  //Serial.println();
+}
+
+void collectParticulate(void){
+  //Serial.print("Particulate:");
+
+  if(!pmsx003_1.getSample(&instant_pm1p0_ugpm3_a, &instant_pm2p5_ugpm3_a, &instant_pm10p0_ugpm3_a)){
+    Serial.println(F("Error: Failed to communicate with Particulate sensor A, restarting"));
+    Serial.flush();
+    watchdogForceReset();
+  }
   
-  //Serial.println();  
+  if(!pmsx003_2.getSample(&instant_pm1p0_ugpm3_b, &instant_pm2p5_ugpm3_b, &instant_pm10p0_ugpm3_b)){
+    Serial.println(F("Error: Failed to communicate with Particulate sensor B, restarting"));
+    Serial.flush();
+    watchdogForceReset();
+  }
+
+  addSample(PM1P0_SAMPLE_BUFFER, (instant_pm1p0_ugpm3_a + instant_pm1p0_ugpm3_b)/2);
+  addSample(PM2P5_SAMPLE_BUFFER, (instant_pm2p5_ugpm3_a + instant_pm2p5_ugpm3_b)/2);
+  addSample(PM10P0_SAMPLE_BUFFER, (instant_pm10p0_ugpm3_a + instant_pm10p0_ugpm3_b)/2);
+  
+  if(sample_buffer_idx == (sample_buffer_depth - 1)){
+    particulate_ready = true;
+  }  
+  
+  //Serial.println();
 }
 
 float pressure_scale_factor(void){
@@ -5126,9 +5232,9 @@ float pressure_scale_factor(void){
 
 void co2_convert_to_ppm(float average, float * converted_value, float * temperature_compensated_value){
   static boolean first_access = true;
-  static float co2_zero_volts = 0.0f;
+  static float co2_zero_ppm = 0.0f;
   if(first_access){
-    co2_zero_volts = eeprom_read_float((const float *) EEPROM_CO2_CAL_OFFSET);
+    co2_zero_ppm = eeprom_read_float((const float *) EEPROM_CO2_CAL_OFFSET);
     first_access = false;
   }
 
@@ -5138,7 +5244,7 @@ void co2_convert_to_ppm(float average, float * converted_value, float * temperat
   // there's no interpretation needed for this sensor, we don't actually have any "raw" data
   *converted_value = average;
 
-  *temperature_compensated_value = *converted_value; // no compensation yet
+  *temperature_compensated_value = *converted_value - co2_zero_ppm; // no compensation yet
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
   }
@@ -5193,6 +5299,126 @@ boolean publishCO2(){
   return mqttPublish(MQTT_TOPIC_STRING, scratch);
 }
 
+void pm1p0_convert_to_ugpm3(float average, float * converted_value, float * temperature_compensated_value){
+  static boolean first_access = true;
+  static float pm1p0_zero_ugpm3 = 0.0f;
+  if(first_access){
+    pm1p0_zero_ugpm3 = eeprom_read_float((const float *) EEPROM_PM1P0_CAL_OFFSET);
+    first_access = false;
+  }
+
+  // TODO: if we find there are temperature effects to compensate for, calculate parameters for compensation here
+  // TODO: apply compensation formula using temperature dependant parameters here
+
+  // there's no interpretation needed for this sensor, we don't actually have any "raw" data, i.e. we aren't reporting counts
+  *converted_value = average;
+
+  *temperature_compensated_value = *converted_value - pm1p0_zero_ugpm3;
+  if(*temperature_compensated_value <= 0.0f){
+    *temperature_compensated_value = 0.0f;
+  }
+}
+
+void pm2p5_convert_to_ugpm3(float average, float * converted_value, float * temperature_compensated_value){
+  static boolean first_access = true;
+  static float pm2p5_zero_ugpm3 = 0.0f;
+  if(first_access){
+    pm2p5_zero_ugpm3 = eeprom_read_float((const float *) EEPROM_PM2P5_CAL_OFFSET);
+    first_access = false;
+  }
+
+  // TODO: if we find there are temperature effects to compensate for, calculate parameters for compensation here
+  // TODO: apply compensation formula using temperature dependant parameters here
+
+  // there's no interpretation needed for this sensor, we don't actually have any "raw" data, i.e. we aren't reporting counts
+  *converted_value = average;
+
+  *temperature_compensated_value = *converted_value - pm2p5_zero_ugpm3;
+  if(*temperature_compensated_value <= 0.0f){
+    *temperature_compensated_value = 0.0f;
+  }
+}
+
+void pm10p0_convert_to_ugpm3(float average, float * converted_value, float * temperature_compensated_value){
+  static boolean first_access = true;
+  static float pm10p0_zero_ugpm3 = 0.0f;
+  if(first_access){
+    pm10p0_zero_ugpm3 = eeprom_read_float((const float *) EEPROM_PM10P0_CAL_OFFSET);
+    first_access = false;
+  }
+
+  // TODO: if we find there are temperature effects to compensate for, calculate parameters for compensation here
+  // TODO: apply compensation formula using temperature dependant parameters here
+
+  // there's no interpretation needed for this sensor, we don't actually have any "raw" data, i.e. we aren't reporting counts
+  *converted_value = average;
+
+  *temperature_compensated_value = *converted_value - pm10p0_zero_ugpm3;
+  if(*temperature_compensated_value <= 0.0f){
+    *temperature_compensated_value = 0.0f;
+  }
+}
+
+boolean publishParticulate(){
+  clearTempBuffers();
+  uint16_t num_samples = particulate_ready ? sample_buffer_depth : sample_buffer_idx;
+  float pm1p0_converted_value = 0.0f, pm1p0_compensated_value = 0.0f;
+  float pm2p5_converted_value = 0.0f, pm2p5_compensated_value = 0.0f;
+  float pm10p0_converted_value = 0.0f, pm10p0_compensated_value = 0.0f;
+  
+  float pm1p0_moving_average = calculateAverage(&(sample_buffer[PM1P0_SAMPLE_BUFFER][0]), num_samples);
+  float pm2p5_moving_average = calculateAverage(&(sample_buffer[PM2P5_SAMPLE_BUFFER][0]), num_samples);
+  float pm10p0_moving_average = calculateAverage(&(sample_buffer[PM10P0_SAMPLE_BUFFER][0]), num_samples);
+  
+  pm1p0_convert_to_ugpm3(pm1p0_moving_average, &pm1p0_converted_value, &pm1p0_compensated_value);
+  pm2p5_convert_to_ugpm3(pm2p5_moving_average, &pm2p5_converted_value, &pm2p5_compensated_value);
+  pm10p0_convert_to_ugpm3(pm10p0_moving_average, &pm10p0_converted_value, &pm10p0_compensated_value);
+
+  pm1p0_ugpm3 = pm1p0_compensated_value;
+  pm2p5_ugpm3 = pm2p5_compensated_value;
+  pm10p0_ugpm3 = pm10p0_compensated_value;
+   
+  safe_dtostrf(pm1p0_compensated_value, -8, 1, converted_value_string, 16);
+  safe_dtostrf(pm2p5_compensated_value, -8, 1, compensated_value_string, 16);
+  safe_dtostrf(pm10p0_compensated_value, -8, 1, raw_instant_value_string, 16);
+
+  //trim_string(raw_value_string);
+  trim_string(converted_value_string);
+  trim_string(compensated_value_string);
+  trim_string(raw_instant_value_string);
+
+  //replace_nan_with_null(raw_value_string);
+  replace_nan_with_null(converted_value_string);
+  replace_nan_with_null(compensated_value_string);
+  replace_nan_with_null(raw_instant_value_string);
+
+  snprintf(scratch, SCRATCH_BUFFER_SIZE-1,
+    "{"
+    "\"serial-number\":\"%s\","
+    "\"pm10p0\":%s,"
+    "\"pm1p0\":%s,"
+    "\"converted-units\":\"ppm\","
+    "\"pm2p5\":%s,"
+    "\"sensor-part-number\":\"PMS5003\""
+    "%s"
+    "}",
+    mqtt_client_id,
+    raw_instant_value_string,
+    converted_value_string,
+    compensated_value_string,
+    gps_mqtt_string);
+
+  replace_character(scratch, '\'', '\"'); // replace single quotes with double quotes
+
+  strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
+  strcat(MQTT_TOPIC_STRING, "particulate");
+  if(mqtt_suffix_enabled){
+    strcat(MQTT_TOPIC_STRING, "/");
+    strcat(MQTT_TOPIC_STRING, mqtt_client_id);
+  }
+  return mqttPublish(MQTT_TOPIC_STRING, scratch);
+}
+
 void petWatchdog(void){
   tinywdt.pet();
 }
@@ -5208,7 +5434,7 @@ void watchdogForceReset(void){
                 " RESET REQUIRED "));
   backlightOn();
   ERROR_MESSAGE_DELAY();
-  
+
   for(;;){
     soft_restart();
     delay(1000);
@@ -5463,12 +5689,12 @@ void printCsvDataLine(){
   boolean sdcard_write_succeeded = true;
   char filename[16] = {0};
 //  if(init_sdcard_ok){
-  if (SD.begin(16)) {    
+  if (SD.begin(16)) {
     getNowFilename(filename, 15);
-    File dataFile = SD.open(filename, FILE_WRITE);          
-    if(dataFile) {      
+    File dataFile = SD.open(filename, FILE_WRITE);
+    if(dataFile) {
       dataFile.print(dataString);
-      dataFile.close();    
+      dataFile.close();
     }
     else{
       sdcard_write_succeeded = false;
@@ -5476,24 +5702,24 @@ void printCsvDataLine(){
   }
 
   if(mode == SUBMODE_OFFLINE){
-    if(((call_counter % 10) == 0) && sdcard_write_succeeded){ // once every 10 reports    
-      clearLCD(false);    
+    if(((call_counter % 10) == 0) && sdcard_write_succeeded){ // once every 10 reports
+      clearLCD(false);
       if(init_sdcard_ok){
         setLCD_P(PSTR("  LOGGING DATA  "
-                      "   TO SD CARD   "));     
+                      "   TO SD CARD   "));
       }
       else{ // if(!init_sdcard_ok)
         setLCD_P(PSTR("  LOGGING DATA  "
                       "  TO USB-SERIAL "));
-      }    
-      repaintLCD();    
+      }
+      repaintLCD();
     }
     else if(sdcard_write_succeeded){ // otherwise display the data (implied, or no sd card installed)
       clearLCD(false);
       updateLCD("TEMP ", 0, 0, 5, false);
       updateLCD("RH ", 10, 0, 3, false);
       updateLCD("CO2 ", 0, 1, 4, false);
-  
+
       if(init_sht25_ok){
         float reported_temperature = temperature_degc - reported_temperature_offset_degC;
         if(temperature_units == 'F'){
@@ -5505,7 +5731,7 @@ void printCsvDataLine(){
         // sht25 is not ok
         updateLCD("XXX", 5, 0, 3, false);
       }
-  
+
       if(init_sht25_ok){
         float reported_relative_humidity_percent = relative_humidity_percent - reported_humidity_offset_percent;
         updateLCD(reported_relative_humidity_percent, 13, 0, 3, false);
@@ -5513,11 +5739,11 @@ void printCsvDataLine(){
       else{
         updateLCD("XXX", 13, 0, 3, false);
       }
-  
+
       updateLCD(co2_ppm, 5, 1, 5, false);
-  
+
       repaintLCD();
-    }    
+    }
     else { // if( !sdcard_write_succeeded )
       Serial.print("Error: Failed to open SD card file named \"");
       Serial.print(filename);
@@ -5525,9 +5751,9 @@ void printCsvDataLine(){
       clearLCD(false);
       setLCD_P(PSTR("  SD CARD FILE  "
                     "  OPEN FAILED   "));
-      lcdFrownie(15, 1);          
-    }    
-          
+      lcdFrownie(15, 1);
+    }
+
   }
 
   call_counter++;
@@ -6379,7 +6605,7 @@ void doSoftApModeConfigBehavior(void){
     // if it's in the white list allow it
     boolean in_whitelist = false;
     for(uint8_t jj = 0; jj < sizeof(whitelist); jj++){
-      char wl_char = pgm_read_byte(&(whitelist[jj])); 
+      char wl_char = pgm_read_byte(&(whitelist[jj]));
       if(wl_char == c){
         in_whitelist = true;
         break;
@@ -6454,7 +6680,7 @@ void doSoftApModeConfigBehavior(void){
 
           // pay attention to incoming traffic
           while(esp.available()){
-            char c = esp.read();            
+            char c = esp.read();
             if(got_opening_brace){
               if(c == '}'){
                 got_closing_brace = true;
@@ -6690,7 +6916,7 @@ boolean parseConfigurationMessageBody(char * body){
      Serial.println("\"");
 
     // handlers for valid JSON keys
-    if(strcmp(key, "ssid") == 0){      
+    if(strcmp(key, "ssid") == 0){
       found_ssid = true;
       strcpy(ssid, value);
     }
