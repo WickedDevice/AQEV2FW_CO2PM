@@ -5235,6 +5235,10 @@ void co2_convert_to_ppm(float average, float * converted_value, float * temperat
   static float co2_zero_ppm = 0.0f;
   if(first_access){
     co2_zero_ppm = eeprom_read_float((const float *) EEPROM_CO2_CAL_OFFSET);
+    int32_t as_long = *((int32_t * ) (&co2_zero_ppm));
+    if(as_long == -1){
+      co2_zero_ppm = 0;
+    }
     first_access = false;
   }
 
@@ -5304,6 +5308,10 @@ void pm1p0_convert_to_ugpm3(float average, float * converted_value, float * temp
   static float pm1p0_zero_ugpm3 = 0.0f;
   if(first_access){
     pm1p0_zero_ugpm3 = eeprom_read_float((const float *) EEPROM_PM1P0_CAL_OFFSET);
+    int32_t as_long = *((int32_t * ) (&pm1p0_zero_ugpm3));
+    if(as_long == -1){
+      pm1p0_zero_ugpm3 = 0;
+    }    
     first_access = false;
   }
 
@@ -5324,6 +5332,10 @@ void pm2p5_convert_to_ugpm3(float average, float * converted_value, float * temp
   static float pm2p5_zero_ugpm3 = 0.0f;
   if(first_access){
     pm2p5_zero_ugpm3 = eeprom_read_float((const float *) EEPROM_PM2P5_CAL_OFFSET);
+    int32_t as_long = *((int32_t * ) (&pm2p5_zero_ugpm3));
+    if(as_long == -1){
+      pm2p5_zero_ugpm3 = 0;
+    }     
     first_access = false;
   }
 
@@ -5344,6 +5356,10 @@ void pm10p0_convert_to_ugpm3(float average, float * converted_value, float * tem
   static float pm10p0_zero_ugpm3 = 0.0f;
   if(first_access){
     pm10p0_zero_ugpm3 = eeprom_read_float((const float *) EEPROM_PM10P0_CAL_OFFSET);
+    int32_t as_long = *((int32_t * ) (&pm10p0_zero_ugpm3));
+    if(as_long == -1){
+      pm10p0_zero_ugpm3 = 0;
+    }         
     first_access = false;
   }
 
