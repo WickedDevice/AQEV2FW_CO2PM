@@ -117,14 +117,17 @@ float user_latitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float user_longitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float user_altitude = TinyGPS::GPS_INVALID_F_ALTITUDE;
 
-#define MAX_SAMPLE_BUFFER_DEPTH (120) // 10 minutes @ 5 second resolution
+#define MAX_SAMPLE_BUFFER_DEPTH  (60) // 5 minutes @ 5 second resolution
 #define CO2_SAMPLE_BUFFER         (0)
 #define TEMPERATURE_SAMPLE_BUFFER (1)
 #define HUMIDITY_SAMPLE_BUFFER    (2)
-#define PM1P0_SAMPLE_BUFFER       (3)
-#define PM2P5_SAMPLE_BUFFER       (4)
-#define PM10P0_SAMPLE_BUFFER      (5)
-#define NUM_SAMPLE_BUFFERS        (6)
+#define A_PM1P0_SAMPLE_BUFFER     (3)
+#define A_PM2P5_SAMPLE_BUFFER     (4)
+#define A_PM10P0_SAMPLE_BUFFER    (5)
+#define B_PM1P0_SAMPLE_BUFFER     (6)
+#define B_PM2P5_SAMPLE_BUFFER     (7)
+#define B_PM10P0_SAMPLE_BUFFER    (8)
+#define NUM_SAMPLE_BUFFERS        (9)
 float sample_buffer[NUM_SAMPLE_BUFFERS][MAX_SAMPLE_BUFFER_DEPTH] = {0};
 uint16_t sample_buffer_idx = 0;
 
@@ -537,6 +540,9 @@ const char * header_row = "Timestamp,"
                "Temperature[degC],"
                "Humidity[percent],"
                "CO2[ppm],"
+               "PM1.0[ug/m^3],"
+               "PM2.5[ug/m^3],"
+               "PM10.0[ug/m^3],"
                "Latitude[deg],"
                "Longitude[deg],"
                "Altitude[m]";
@@ -738,7 +744,7 @@ void setup() {
       const uint32_t idle_timeout_period_ms = 1000UL * 60UL * 5UL; // 5 minutes
       uint32_t idle_time_ms = 0;
       Serial.println(F("-~=* In CONFIG Mode *=~-"));
-      if(integrity_check_passed && valid_ssid_passed){
+      if(integrity_check_passed){
         setLCD_P(PSTR("  CONFIG MODE"));
       }
 
@@ -1174,7 +1180,6 @@ void initializeHardware(void) {
     init_spi_flash_ok = false;
   }
 
-  setLCD_P(PSTR("AIR QUALITY EGG "));
   getCurrentFirmwareSignature();
 
   // Initialize SHT25
@@ -1234,6 +1239,8 @@ void initializeHardware(void) {
   pinMode(A4, INPUT_PULLUP);
   pinMode(A7, INPUT_PULLUP);
   pinMode(A5, OUTPUT);
+  pmsx003_1.begin();
+  pmsx003_2.begin();
 
   // put the same thing in for the GPS pins
   // just to be on the safe side
@@ -2126,6 +2133,14 @@ void print_eeprom_value(char * arg) {
     print_eeprom_float((const float *) EEPROM_CO2_CAL_OFFSET);
     Serial.print(F("    ")); Serial.println(F("CO2 Baseline Voltage Characterization:"));
     print_baseline_voltage_characterization(EEPROM_CO2_BASELINE_VOLTAGE_TABLE);
+    
+    print_label_with_star_if_not_backed_up("PM1.0 Offset [ug/m^3]: ", BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT);
+    print_eeprom_float((const float *) EEPROM_PM1P0_CAL_OFFSET);
+    print_label_with_star_if_not_backed_up("PM2.5 Offset [ug/m^3]: ", BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT);
+    print_eeprom_float((const float *) EEPROM_PM2P5_CAL_OFFSET);
+    print_label_with_star_if_not_backed_up("PM10.0 Offset [ug/m^3]: ", BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT);
+    print_eeprom_float((const float *) EEPROM_PM10P0_CAL_OFFSET);
+            
     char temp_reporting_offset_label[64] = {0};
     char temperature_units = (char) eeprom_read_byte((uint8_t *) EEPROM_TEMPERATURE_UNITS);
     snprintf(temp_reporting_offset_label, 63, "Temperature Reporting Offset [deg%c]: ", temperature_units);
@@ -2285,7 +2300,7 @@ void restore(char * arg) {
     eeprom_write_block("update.wickeddevice.com", (void *) EEPROM_UPDATE_SERVER_NAME, 32);
   }
   else if (strncmp("updatefile", arg, 10) == 0) {
-    eeprom_write_block("aqev2_co2_esp", (void *) EEPROM_UPDATE_FILENAME, 32);
+    eeprom_write_block("aqev2_co2pm_esp", (void *) EEPROM_UPDATE_FILENAME, 32);
   }
   else if (strncmp("key", arg, 3) == 0) {
     if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_PRIVATE_KEY_BIT)) {
@@ -5167,7 +5182,7 @@ void collectCO2(void){
   else{
     Serial.println(F("Error: Failed to communicate with CO2 sensor, restarting"));
     Serial.flush();
-    watchdogForceReset();    // TODO: uncomment this
+    watchdogForceReset();
   }
 
   //Serial.println();
@@ -5188,14 +5203,17 @@ void collectParticulate(void){
     watchdogForceReset();
   }
 
-  addSample(PM1P0_SAMPLE_BUFFER, (instant_pm1p0_ugpm3_a + instant_pm1p0_ugpm3_b)/2);
-  addSample(PM2P5_SAMPLE_BUFFER, (instant_pm2p5_ugpm3_a + instant_pm2p5_ugpm3_b)/2);
-  addSample(PM10P0_SAMPLE_BUFFER, (instant_pm10p0_ugpm3_a + instant_pm10p0_ugpm3_b)/2);
-  
+  addSample(A_PM1P0_SAMPLE_BUFFER, instant_pm1p0_ugpm3_a);
+  addSample(A_PM2P5_SAMPLE_BUFFER, instant_pm2p5_ugpm3_a);
+  addSample(A_PM10P0_SAMPLE_BUFFER, instant_pm10p0_ugpm3_a);
+  addSample(B_PM1P0_SAMPLE_BUFFER, instant_pm1p0_ugpm3_b);
+  addSample(B_PM2P5_SAMPLE_BUFFER, instant_pm2p5_ugpm3_b);
+  addSample(B_PM10P0_SAMPLE_BUFFER, instant_pm10p0_ugpm3_b);
+
   if(sample_buffer_idx == (sample_buffer_depth - 1)){
     particulate_ready = true;
   }  
-  
+
   //Serial.println();
 }
 
@@ -5303,7 +5321,7 @@ boolean publishCO2(){
   return mqttPublish(MQTT_TOPIC_STRING, scratch);
 }
 
-void pm1p0_convert_to_ugpm3(float average, float * converted_value, float * temperature_compensated_value){
+void pm1p0_convert_to_ugpm3(float average, float * temperature_compensated_value){
   static boolean first_access = true;
   static float pm1p0_zero_ugpm3 = 0.0f;
   if(first_access){
@@ -5318,16 +5336,13 @@ void pm1p0_convert_to_ugpm3(float average, float * converted_value, float * temp
   // TODO: if we find there are temperature effects to compensate for, calculate parameters for compensation here
   // TODO: apply compensation formula using temperature dependant parameters here
 
-  // there's no interpretation needed for this sensor, we don't actually have any "raw" data, i.e. we aren't reporting counts
-  *converted_value = average;
-
-  *temperature_compensated_value = *converted_value - pm1p0_zero_ugpm3;
+  *temperature_compensated_value = average - pm1p0_zero_ugpm3;
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
   }
 }
 
-void pm2p5_convert_to_ugpm3(float average, float * converted_value, float * temperature_compensated_value){
+void pm2p5_convert_to_ugpm3(float average, float * temperature_compensated_value){
   static boolean first_access = true;
   static float pm2p5_zero_ugpm3 = 0.0f;
   if(first_access){
@@ -5342,16 +5357,13 @@ void pm2p5_convert_to_ugpm3(float average, float * converted_value, float * temp
   // TODO: if we find there are temperature effects to compensate for, calculate parameters for compensation here
   // TODO: apply compensation formula using temperature dependant parameters here
 
-  // there's no interpretation needed for this sensor, we don't actually have any "raw" data, i.e. we aren't reporting counts
-  *converted_value = average;
-
-  *temperature_compensated_value = *converted_value - pm2p5_zero_ugpm3;
+  *temperature_compensated_value = average - pm2p5_zero_ugpm3;
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
   }
 }
 
-void pm10p0_convert_to_ugpm3(float average, float * converted_value, float * temperature_compensated_value){
+void pm10p0_convert_to_ugpm3(float average, float * temperature_compensated_value){
   static boolean first_access = true;
   static float pm10p0_zero_ugpm3 = 0.0f;
   if(first_access){
@@ -5366,63 +5378,80 @@ void pm10p0_convert_to_ugpm3(float average, float * converted_value, float * tem
   // TODO: if we find there are temperature effects to compensate for, calculate parameters for compensation here
   // TODO: apply compensation formula using temperature dependant parameters here
 
-  // there's no interpretation needed for this sensor, we don't actually have any "raw" data, i.e. we aren't reporting counts
-  *converted_value = average;
-
-  *temperature_compensated_value = *converted_value - pm10p0_zero_ugpm3;
+  *temperature_compensated_value = average - pm10p0_zero_ugpm3;
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
+  }
+}
+
+void appendAsJSON(char * tgt, char * key, float value, boolean trailing_comma){
+  strcat(tgt, "\"");
+  strcat(tgt, key);
+  strcat(tgt, "\":");
+  
+  memset(converted_value_string, 0, 64);
+  safe_dtostrf(value, -8, 1, converted_value_string, 16);
+  trim_string(converted_value_string);
+  replace_nan_with_null(converted_value_string); 
+  
+  strcat(tgt, converted_value_string);  
+  if(trailing_comma){
+    strcat(tgt, ",");
   }
 }
 
 boolean publishParticulate(){
   clearTempBuffers();
   uint16_t num_samples = particulate_ready ? sample_buffer_depth : sample_buffer_idx;
-  float pm1p0_converted_value = 0.0f, pm1p0_compensated_value = 0.0f;
-  float pm2p5_converted_value = 0.0f, pm2p5_compensated_value = 0.0f;
-  float pm10p0_converted_value = 0.0f, pm10p0_compensated_value = 0.0f;
+  float pm1p0_compensated_value = 0.0f;
+  float pm2p5_compensated_value = 0.0f;
+  float pm10p0_compensated_value = 0.0f;
   
-  float pm1p0_moving_average = calculateAverage(&(sample_buffer[PM1P0_SAMPLE_BUFFER][0]), num_samples);
-  float pm2p5_moving_average = calculateAverage(&(sample_buffer[PM2P5_SAMPLE_BUFFER][0]), num_samples);
-  float pm10p0_moving_average = calculateAverage(&(sample_buffer[PM10P0_SAMPLE_BUFFER][0]), num_samples);
-  
-  pm1p0_convert_to_ugpm3(pm1p0_moving_average, &pm1p0_converted_value, &pm1p0_compensated_value);
-  pm2p5_convert_to_ugpm3(pm2p5_moving_average, &pm2p5_converted_value, &pm2p5_compensated_value);
-  pm10p0_convert_to_ugpm3(pm10p0_moving_average, &pm10p0_converted_value, &pm10p0_compensated_value);
+  float pm1p0_moving_average = calculateAverage(&(sample_buffer[A_PM1P0_SAMPLE_BUFFER][0]), num_samples);
+  float pm2p5_moving_average = calculateAverage(&(sample_buffer[A_PM2P5_SAMPLE_BUFFER][0]), num_samples);
+  float pm10p0_moving_average = calculateAverage(&(sample_buffer[A_PM10P0_SAMPLE_BUFFER][0]), num_samples);    
+  pm1p0_convert_to_ugpm3(pm1p0_moving_average, &pm1p0_compensated_value);
+  pm2p5_convert_to_ugpm3(pm2p5_moving_average, &pm2p5_compensated_value);
+  pm10p0_convert_to_ugpm3(pm10p0_moving_average, &pm10p0_compensated_value);
 
+  // hold on to these compensated averages
   pm1p0_ugpm3 = pm1p0_compensated_value;
   pm2p5_ugpm3 = pm2p5_compensated_value;
   pm10p0_ugpm3 = pm10p0_compensated_value;
-   
-  safe_dtostrf(pm1p0_compensated_value, -8, 1, converted_value_string, 16);
-  safe_dtostrf(pm2p5_compensated_value, -8, 1, compensated_value_string, 16);
-  safe_dtostrf(pm10p0_compensated_value, -8, 1, raw_instant_value_string, 16);
-
-  //trim_string(raw_value_string);
-  trim_string(converted_value_string);
-  trim_string(compensated_value_string);
-  trim_string(raw_instant_value_string);
-
-  //replace_nan_with_null(raw_value_string);
-  replace_nan_with_null(converted_value_string);
-  replace_nan_with_null(compensated_value_string);
-  replace_nan_with_null(raw_instant_value_string);
-
+  
   snprintf(scratch, SCRATCH_BUFFER_SIZE-1,
     "{"
     "\"serial-number\":\"%s\","
-    "\"pm10p0\":%s,"
-    "\"pm1p0\":%s,"
-    "\"converted-units\":\"ppm\","
-    "\"pm2p5\":%s,"
-    "\"sensor-part-number\":\"PMS5003\""
-    "%s"
-    "}",
-    mqtt_client_id,
-    raw_instant_value_string,
-    converted_value_string,
-    compensated_value_string,
-    gps_mqtt_string);
+    "\"converted-units\":\"ug/m^3\","    
+    "\"sensor-part-number\":\"PMS5003\",",
+    mqtt_client_id);
+
+  appendAsJSON(scratch, "pm1p0_a", pm1p0_compensated_value, true);
+  appendAsJSON(scratch, "pm2p5_a", pm2p5_compensated_value, true);
+  appendAsJSON(scratch, "pm10p0_a", pm10p0_compensated_value, true);
+
+  pm1p0_moving_average = calculateAverage(&(sample_buffer[B_PM1P0_SAMPLE_BUFFER][0]), num_samples);
+  pm2p5_moving_average = calculateAverage(&(sample_buffer[B_PM2P5_SAMPLE_BUFFER][0]), num_samples);
+  pm10p0_moving_average = calculateAverage(&(sample_buffer[B_PM10P0_SAMPLE_BUFFER][0]), num_samples);    
+  pm1p0_convert_to_ugpm3(pm1p0_moving_average, &pm1p0_compensated_value);
+  pm2p5_convert_to_ugpm3(pm2p5_moving_average, &pm2p5_compensated_value);
+  pm10p0_convert_to_ugpm3(pm10p0_moving_average, &pm10p0_compensated_value);
+
+  appendAsJSON(scratch, "pm1p0_b", pm1p0_compensated_value, true);
+  appendAsJSON(scratch, "pm2p5_b", pm2p5_compensated_value, true);
+  appendAsJSON(scratch, "pm10p0_b", pm10p0_compensated_value, true);
+
+  // the displayed value is the combined average
+  pm1p0_ugpm3 = (pm1p0_ugpm3 + pm1p0_compensated_value) / 2;
+  pm2p5_ugpm3 = (pm2p5_ugpm3 + pm2p5_compensated_value) / 2;
+  pm10p0_ugpm3 = (pm10p0_ugpm3 + pm10p0_compensated_value) / 2;  
+
+  appendAsJSON(scratch, "pm1p0", pm1p0_ugpm3, true);
+  appendAsJSON(scratch, "pm2p5", pm2p5_ugpm3, true);
+  appendAsJSON(scratch, "pm10p0", pm10p0_ugpm3, true);
+
+  strcat(scratch, gps_mqtt_string);
+  strcat(scratch, "}");
 
   replace_character(scratch, '\'', '\"'); // replace single quotes with double quotes
 
@@ -5547,6 +5576,20 @@ void loop_wifi_mqtt_mode(void){
         }
         else{
           updateLCD("---", 5, 1, 5, false);
+        }
+
+
+        // TODO: how to handle the LCD with so many readings
+        if(particulate_ready || (sample_buffer_idx > 0)){
+          if(!publishParticulate()){
+            Serial.println(F("Error: Failed to publish Particulate."));
+          }
+          else{            
+            // updateLCD(co2_ppm, 5, 1, 5, false);
+          }
+        }
+        else{
+          // updateLCD("---", 5, 1, 5, false);
         }
 
         repaintLCD();
@@ -5690,6 +5733,56 @@ void printCsvDataLine(){
 
     Serial.print(co2_moving_average, 1);
     appendToString(co2_moving_average, 1, dataString, &dataStringRemaining);
+  }
+  else{
+    Serial.print(F("---"));
+    appendToString("---", dataString, &dataStringRemaining);
+  }
+
+  Serial.print(F(","));
+  appendToString("," , dataString, &dataStringRemaining);
+
+  float pm1p0_moving_average = 0.0f;
+  float pm2p5_moving_average = 0.0f;
+  float pm10p0_moving_average = 0.0f;
+  num_samples = particulate_ready ? sample_buffer_depth : sample_buffer_idx;
+  if(particulate_ready || (sample_buffer_idx > 0)){
+    float converted_value = 0.0f, compensated_value = 0.0f;
+    pm1p0_moving_average = calculateAverage(&(sample_buffer[A_PM1P0_SAMPLE_BUFFER][0]), num_samples);
+    pm1p0_convert_to_ugpm3(pm1p0_moving_average, &compensated_value);
+    pm1p0_ugpm3 = compensated_value;
+    pm1p0_moving_average = calculateAverage(&(sample_buffer[B_PM1P0_SAMPLE_BUFFER][0]), num_samples);
+    pm1p0_convert_to_ugpm3(pm1p0_moving_average, &compensated_value);
+    pm1p0_ugpm3 = (pm1p0_ugpm3 + compensated_value) / 2;
+
+    Serial.print(pm1p0_moving_average, 1);
+    appendToString(pm1p0_moving_average, 1, dataString, &dataStringRemaining);
+
+    Serial.print(F(","));
+    appendToString("," , dataString, &dataStringRemaining);    
+    
+    pm2p5_moving_average = calculateAverage(&(sample_buffer[A_PM2P5_SAMPLE_BUFFER][0]), num_samples);
+    pm2p5_convert_to_ugpm3(pm2p5_moving_average, &compensated_value);
+    pm2p5_ugpm3 = compensated_value;
+    pm2p5_moving_average = calculateAverage(&(sample_buffer[B_PM2P5_SAMPLE_BUFFER][0]), num_samples);
+    pm2p5_convert_to_ugpm3(pm2p5_moving_average, &compensated_value);
+    pm2p5_ugpm3 = (pm2p5_ugpm3 + compensated_value) / 2;
+
+    Serial.print(pm2p5_moving_average, 1);
+    appendToString(pm2p5_moving_average, 1, dataString, &dataStringRemaining);
+
+    Serial.print(F(","));
+    appendToString("," , dataString, &dataStringRemaining);    
+
+    pm10p0_moving_average = calculateAverage(&(sample_buffer[A_PM10P0_SAMPLE_BUFFER][0]), num_samples);
+    pm10p0_convert_to_ugpm3(pm10p0_moving_average, &compensated_value);
+    pm10p0_ugpm3 = compensated_value;
+    pm10p0_moving_average = calculateAverage(&(sample_buffer[B_PM10P0_SAMPLE_BUFFER][0]), num_samples);
+    pm10p0_convert_to_ugpm3(pm10p0_moving_average, &compensated_value);
+    pm10p0_ugpm3 = (pm10p0_ugpm3 + compensated_value) / 2;
+
+    Serial.print(pm10p0_moving_average, 1);
+    appendToString(pm10p0_moving_average, 1, dataString, &dataStringRemaining);
   }
   else{
     Serial.print(F("---"));
