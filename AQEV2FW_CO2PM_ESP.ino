@@ -19,6 +19,8 @@
 #include <PMSX003.h>
 #include <jsmn.h>
 #include <SoftReset.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
 
 // semantic versioning - see http://semver.org/
 #define AQEV2FW_MAJOR_VERSION 2
@@ -67,6 +69,8 @@ SoftwareSerial pmsx003Serial_1(A4, A5);  // RX, TX
 PMSX003 pmsx003_1(&pmsx003Serial_1);
 PMSX003 pmsx003_2(&pmsx003Serial_2);
 
+Adafruit_BMP280 bme;
+
 int sensor_enable = 17;
 
 boolean gps_disabled = false;
@@ -97,6 +101,7 @@ float co2_ppm = 0.0f;
 float pm1p0_ugpm3 = 0.0f;
 float pm2p5_ugpm3 = 0.0f;
 float pm10p0_ugpm3 = 0.0f;
+float pressure_pa = 0.0f;
 
 float instant_temperature_degc = 0.0f;
 float instant_humidity_percent = 0.0f;
@@ -107,6 +112,8 @@ float instant_pm10p0_ugpm3_a = 0.0f;
 float instant_pm1p0_ugpm3_b = 0.0f;
 float instant_pm2p5_ugpm3_b = 0.0f;
 float instant_pm10p0_ugpm3_b = 0.0f;
+float instant_pressure_pa = 0.0f;
+float instant_altitude_m = 0.0f;
 
 float gps_latitude = TinyGPS::GPS_INVALID_F_ANGLE;
 float gps_longitude = TinyGPS::GPS_INVALID_F_ANGLE;
@@ -127,7 +134,8 @@ float user_altitude = TinyGPS::GPS_INVALID_F_ALTITUDE;
 #define B_PM1P0_SAMPLE_BUFFER     (6)
 #define B_PM2P5_SAMPLE_BUFFER     (7)
 #define B_PM10P0_SAMPLE_BUFFER    (8)
-#define NUM_SAMPLE_BUFFERS        (9)
+#define PRESSURE_SAMPLE_BUFFER    (9)
+#define NUM_SAMPLE_BUFFERS        (10)
 float sample_buffer[NUM_SAMPLE_BUFFERS][MAX_SAMPLE_BUFFER_DEPTH] = {0};
 uint16_t sample_buffer_idx = 0;
 
@@ -148,12 +156,14 @@ boolean temperature_ready = false;
 boolean humidity_ready = false;
 boolean co2_ready = false;
 boolean particulate_ready = false;
+boolean pressure_ready = false;
 
 boolean init_sht25_ok = false;
 boolean init_spi_flash_ok = false;
 boolean init_esp8266_ok = false;
 boolean init_sdcard_ok = false;
 boolean init_rtc_ok = false;
+boolean init_bmp280_ok = false;
 
 typedef struct{
   float temperature_degC;     // starting at this temperature
@@ -543,6 +553,7 @@ const char * header_row = "Timestamp,"
                "PM1.0[ug/m^3],"
                "PM2.5[ug/m^3],"
                "PM10.0[ug/m^3],"
+               "Pressure[Pa],"
                "Latitude[deg],"
                "Longitude[deg],"
                "Altitude[m]";
@@ -981,6 +992,7 @@ void loop() {
     collectTemperature();
     collectHumidity();
     collectParticulate();
+    collectPressure();
     advanceSampleBufferIndex();
   }
 
@@ -1191,6 +1203,17 @@ void initializeHardware(void) {
   else {
     Serial.println(F("Failed."));
     init_sht25_ok = false;
+  }
+
+
+  Serial.print(F("Info: BMP280 Initialization..."));
+  if (!bme.begin()) { 
+    Serial.println(F("Fail."));
+    init_bmp280_ok = false;
+  }
+  else{
+    Serial.println(F("OK."));
+    init_bmp280_ok = true;
   }
 
   // Initialize SD card
@@ -5168,6 +5191,16 @@ void addSample(uint8_t sample_type, float value){
   }
 }
 
+void collectPressure(void){
+  if(init_bmp280_ok){
+    instant_pressure_pa = bme.readPressure();
+    instant_altitude_m = bme.readAltitude();
+    addSample(PRESSURE_SAMPLE_BUFFER, instant_pressure_pa);
+    if(sample_buffer_idx == (sample_buffer_depth - 1)){
+      pressure_ready = true;
+    }
+  }
+}
 
 void collectCO2(void){
   //Serial.print("CO2:");
@@ -5270,6 +5303,46 @@ void co2_convert_to_ppm(float average, float * converted_value, float * temperat
   if(*temperature_compensated_value <= 0.0f){
     *temperature_compensated_value = 0.0f;
   }
+}
+
+boolean publishPressure(){
+  clearTempBuffers();
+  uint16_t num_samples = pressure_ready ? sample_buffer_depth : sample_buffer_idx;
+  float pressure_moving_average = calculateAverage(&(sample_buffer[PRESSURE_SAMPLE_BUFFER][0]), num_samples);
+  pressure_pa = pressure_moving_average;
+
+  safe_dtostrf(pressure_pa, -8, 1, converted_value_string, 16);
+  trim_string(converted_value_string);
+  replace_nan_with_null(converted_value_string);
+
+  safe_dtostrf(instant_altitude_m, -8, 1, compensated_value_string, 16);
+  trim_string(compensated_value_string);
+  replace_nan_with_null(compensated_value_string);
+  
+  snprintf(scratch, SCRATCH_BUFFER_SIZE-1,
+    "{"
+    "\"serial-number\":\"%s\","
+    "\"pressure-units\":\"Pa\","
+    "\"pressure\":%s,"
+    "\"altitude-units\":\"m\","
+    "\"altitude\":%s,"    
+    "\"sensor-part-number\":\"BMP280\""
+    "%s"
+    "}",
+    mqtt_client_id,    
+    converted_value_string,
+    compensated_value_string,
+    gps_mqtt_string);
+
+  replace_character(scratch, '\'', '\"'); // replace single quotes with double quotes
+
+  strcat(MQTT_TOPIC_STRING, MQTT_TOPIC_PREFIX);
+  strcat(MQTT_TOPIC_STRING, "pressure");
+  if(mqtt_suffix_enabled){
+    strcat(MQTT_TOPIC_STRING, "/");
+    strcat(MQTT_TOPIC_STRING, mqtt_client_id);
+  }
+  return mqttPublish(MQTT_TOPIC_STRING, scratch);
 }
 
 boolean publishCO2(){
@@ -5592,6 +5665,18 @@ void loop_wifi_mqtt_mode(void){
           // updateLCD("---", 5, 1, 5, false);
         }
 
+        if(pressure_ready || (sample_buffer_idx > 0)){
+          if(!publishPressure()){
+            Serial.println(F("Error: Failed to publish Pressure."));
+          }
+          else{            
+            // updateLCD(co2_ppm, 5, 1, 5, false);
+          }
+        }
+        else{
+          // updateLCD("---", 5, 1, 5, false);
+        }
+
         repaintLCD();
       }
       else{
@@ -5783,6 +5868,23 @@ void printCsvDataLine(){
 
     Serial.print(pm10p0_moving_average, 1);
     appendToString(pm10p0_moving_average, 1, dataString, &dataStringRemaining);
+  }
+  else{
+    Serial.print(F("---"));
+    appendToString("---", dataString, &dataStringRemaining);
+  }
+
+  Serial.print(F(","));
+  appendToString("," , dataString, &dataStringRemaining);  
+
+  float pressure_moving_average = 0.0f;
+  num_samples = pressure_ready ? sample_buffer_depth : sample_buffer_idx;
+  if(pressure_ready || (sample_buffer_idx > 0)){    
+    pressure_moving_average = calculateAverage(&(sample_buffer[PRESSURE_SAMPLE_BUFFER][0]), num_samples);    
+    pressure_pa = pressure_moving_average;
+
+    Serial.print(pressure_moving_average, 1);
+    appendToString(pressure_moving_average, 1, dataString, &dataStringRemaining);
   }
   else{
     Serial.print(F("---"));
