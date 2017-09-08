@@ -5665,7 +5665,7 @@ void loop_wifi_mqtt_mode(void){
           // updateLCD("---", 5, 1, 5, false);
         }
 
-        if(pressure_ready || (sample_buffer_idx > 0)){
+        if(init_bmp280_ok && (pressure_ready || (sample_buffer_idx > 0))){
           if(!publishPressure()){
             Serial.println(F("Error: Failed to publish Pressure."));
           }
