@@ -5628,7 +5628,7 @@ boolean publishParticulate(){
 
   appendAsJSON(scratch, "pm1p0", pm1p0_ugpm3, true);
   appendAsJSON(scratch, "pm2p5", pm2p5_ugpm3, true);
-  appendAsJSON(scratch, "pm10p0", pm10p0_ugpm3, true);
+  appendAsJSON(scratch, "pm10p0", pm10p0_ugpm3, false);
 
   strcat(scratch, gps_mqtt_string);
   strcat(scratch, "}");
@@ -7014,7 +7014,7 @@ void doSoftApModeConfigBehavior(void){
             floatToJsString(eeprom_read_float((float *) EEPROM_USER_LATITUDE_DEG), userLat, 6);
             floatToJsString(eeprom_read_float((float *) EEPROM_USER_LONGITUDE_DEG), userLng, 6);
 
-            const char model_type[] = "D";
+            const char model_type[] = "G";
             const char true_string[] = "true";
             const char false_string[] = "false";
 
