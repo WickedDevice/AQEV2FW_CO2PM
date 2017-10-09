@@ -216,7 +216,7 @@ uint8_t mode = MODE_OPERATIONAL;
 #define EEPROM_CO_CAL_SLOPE       (EEPROM_CO_SENSITIVITY - 4)     // float value, 4-bytes, the slope applied to the sensor   [UNUSED]
 #define EEPROM_CO_CAL_OFFSET      (EEPROM_CO_CAL_SLOPE - 4)       // float value, 4-bytes, the offset applied to the sensor  [UNUSED]
 #define EEPROM_PRIVATE_KEY        (EEPROM_CO_CAL_OFFSET - 32)     // 32-bytes of Random Data (256-bits)
-#define EEPROM_MQTT_SERVER_NAME   (EEPROM_PRIVATE_KEY - 32)       // string, the DNS name of the MQTT server (default mqtt.opensensors.io), up to 32 characters (one of which is a null terminator)
+#define EEPROM_MQTT_SERVER_NAME   (EEPROM_PRIVATE_KEY - 32)       // string, the DNS name of the MQTT server (default mqtt.wickeddevice.com), up to 32 characters (one of which is a null terminator)
 #define EEPROM_MQTT_USERNAME      (EEPROM_MQTT_SERVER_NAME - 32)  // string, the user name for the MQTT server (default wickeddevice), up to 32 characters (one of which is a null terminator)
 #define EEPROM_MQTT_CLIENT_ID     (EEPROM_MQTT_USERNAME - 32)     // string, the client identifier for the MQTT server (default SHT25 identifier), between 1 and 23 characters long
 #define EEPROM_MQTT_AUTH          (EEPROM_MQTT_CLIENT_ID - 1)     // MQTT authentication enabled, single byte value 0 = disabled or 1 = enabled
@@ -889,6 +889,7 @@ void setup() {
 
     // Check for Firmware Updates
     checkForFirmwareUpdates();
+    checkForESPFirmwareUpdates();
     integrity_check_passed = checkConfigIntegrity();
     if(!integrity_check_passed){
       Serial.println(F("Error: Config Integrity Check Failed after checkForFirmwareUpdates"));
@@ -1447,6 +1448,35 @@ void initializeNewConfigSettings(void){
     }
 
     recomputeAndStoreConfigChecksum();
+  }
+
+  // re-configure from mqtt.opensensors.io to mqtt.wickeddevice.com
+  clearTempBuffers();
+  eeprom_read_block(command_buf, (const void *) EEPROM_MQTT_SERVER_NAME, 32);
+  if(strcmp_P(command_buf, PSTR("mqtt.opensensors.io")) == 0){
+    memset(command_buf, 0, 128);
+    eeprom_read_block(command_buf, (const void *) EEPROM_MQTT_USERNAME, 32);
+    if(strcmp_P(command_buf, PSTR("wickeddevice")) == 0){      
+      eeprom_read_block(converted_value_string, (const void *) EEPROM_MQTT_CLIENT_ID, 32);
+      if(strncmp_P(converted_value_string, PSTR("egg"), 3) == 0){
+        
+        if(!in_config_mode){
+          configInject("aqe\r");
+          in_config_mode = true;
+        }        
+        
+        // change the mqtt server to mqtt.wickeddevice.com
+        // and change the mqtt username to the egg serial number
+        // effectively:
+        //   configInject("mqttsrv mqtt.wickeddevice.com\r");
+        //   configInject("mqttuser egg-serial-number \r");
+        configInject("mqttsrv mqtt.wickeddevice.com\r");
+        strcpy_P(raw_instant_value_string, PSTR("mqttuser "));
+        strcat(raw_instant_value_string, converted_value_string);
+        strcat_P(raw_instant_value_string, PSTR("\r"));
+        configInject(raw_instant_value_string);
+      }      
+    }
   }
 
   if(in_config_mode){
@@ -2348,10 +2378,10 @@ void restore(char * arg) {
     configInject("altitude -1\r");
     configInject("backlight 60\r");
     configInject("backlight initon\r");
-    configInject("mqttsrv mqtt.opensensors.io\r");
+    configInject("mqttsrv mqtt.wickeddevice.com\r");
     configInject("mqttport 1883\r");
     configInject("mqttauth enable\r");
-    configInject("mqttuser wickeddevice\r");
+    // configInject("mqttuser wickeddevice\r");
     configInject("mqttprefix /orgs/wd/aqe/\r");
     configInject("mqttsuffix enable\r");
     configInject("sampling 5, 60, 60\r"); // sample every 5 seconds, average over 1 minutes, report every minute
@@ -2368,6 +2398,10 @@ void restore(char * arg) {
     configInject("restore co2\r");
     configInject("restore particulate\r");
     configInject("restore mac\r");
+
+    // copy the MQTT ID to the MQTT Username
+    eeprom_read_block((void *) tmp, (const void *) EEPROM_MQTT_CLIENT_ID, 32);
+    eeprom_write_block((void *) tmp, (void *) EEPROM_MQTT_USERNAME, 32);
 
     eeprom_write_block(blank, (void *) EEPROM_SSID, 32); // clear the SSID
     eeprom_write_block(blank, (void *) EEPROM_NETWORK_PWD, 32); // clear the Network Password
@@ -7236,3 +7270,97 @@ boolean parseConfigurationMessageBody(char * body){
 
   return found_exit;
 }
+
+void checkForESPFirmwareUpdates(){
+  // the firmware version should be at least 1.5.0.0 = 01 50 00 00
+  uint32_t version_int = 0;
+  if(esp.getVersion(&version_int)){
+    Serial.print(F("Info: Current ESP8266 Firmware Version is "));
+    Serial.println(version_int);
+    if(version_int >= 1050000UL){
+      Serial.println(F("Info: ESP8266 Firmware Version is up to date"));
+    }
+    else {
+      Serial.println(F("Info: ESP8266 Firmware Update required..."));
+      doESP8266Update();
+    }
+  }
+  else{
+    Serial.println(F("Error: Failed to get ESP8266 firmware version"));
+  }  
+}
+
+void doESP8266Update(){
+   boolean timeout = false;
+   boolean gotOK = false;
+
+   int32_t timeout_interval =  300000; // 5 minutes
+
+   setLCD_P(PSTR("   PERFORMING   "
+                 "   ESP UPDATES  "));
+                 
+   Serial.print(F("Info: Starting ESP8266 Firmware Update..."));
+   if(esp.firmwareUpdateBegin()){
+     // Serial.println(F("OK"));
+     uint8_t status = 0xff;
+     uint32_t previousMillis = millis();
+     while(esp.firmwareUpdateStatus(&status) && !timeout){
+       // Serial.print(F("Info: Pet watchdog @ "));
+       // Serial.println(millis());
+       petWatchdog();
+       delayForWatchdog();
+
+       if(status == 2){
+         gotOK = true;
+         // Serial.println(F("ESP8266 returned OK."));
+       }
+       else if(status == 3){
+         if(gotOK){
+           Serial.println(F("Done."));
+           break; // break out of the loop and perform a reboot
+         }
+         else{
+           Serial.println(F("Unexpected Error."));
+           Serial.println(F("Warning: ESP8266 Reset occurred before receiving OK."));
+           return;
+         }
+       }
+
+       if(status != 0xff){
+         previousMillis =  current_millis; // reset timeout on state change
+         // Serial.print("ESP8266 Status Changed to ");
+         // Serial.println(status);
+         status = 0xff;
+       }
+
+       current_millis = millis();
+       if(current_millis - previousMillis >= timeout_interval){
+          timeout = true;
+       }
+     }
+     if(timeout){
+       Serial.println(F("Timeout Error."));
+       return;
+     }
+     else if(status == 1){
+       Serial.println(F("Unknown Error."));
+       return;
+     }
+   }
+   else {
+     Serial.println(F("Failed."));     
+     return;
+   }
+   
+   Serial.print(F("Info: ESP8266 restoring defaults..."));
+   if(esp.restoreDefault()){
+     Serial.println(F("OK."));
+   }
+   else{
+     Serial.println(F("Failed."));
+   }
+
+   Serial.flush();
+   watchdogForceReset();
+}
+
