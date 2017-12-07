@@ -5129,7 +5129,7 @@ boolean publishHeartbeat(){
   "\"serial-number\":\"%s\","
   "\"converted-value\":%d,"
   "\"firmware-version\":\"%s\","
-  "\"publishes\":[\"co2\",\"temperature\",\"humidity\"%s],"
+  "\"publishes\":[\"co2\",\"particulate\",\"temperature\",\"humidity\"%s],"
   "\"counter\":%lu"
   "}", mqtt_client_id, sample, firmware_version, hasPressureString, post_counter++);
 
