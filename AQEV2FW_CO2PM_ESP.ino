@@ -3730,6 +3730,19 @@ void backup(char * arg) {
       eeprom_write_word((uint16_t *) EEPROM_BACKUP_CHECK, backup_check);
     }
   }
+  else if (strncmp("particulate", arg, 11) == 0) {
+    eeprom_read_block(tmp, (const void *) EEPROM_PM1P0_CAL_OFFSET, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM1P0_CAL_OFFSET, 4);
+    eeprom_read_block(tmp, (const void *) EEPROM_PM2P5_CAL_OFFSET, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM2P5_CAL_OFFSET, 4);
+    eeprom_read_block(tmp, (const void *) EEPROM_PM10P0_CAL_OFFSET, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM10P0_CAL_OFFSET, 4);    
+    
+    if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT)) {
+      CLEAR_BIT(backup_check, BACKUP_STATUS_PARTICULATE_CALIBRATION_BIT);
+      eeprom_write_word((uint16_t *) EEPROM_BACKUP_CHECK, backup_check);
+    }
+  }  
   else if (strncmp("temp", arg, 4) == 0) {
     eeprom_read_block(tmp, (const void *) EEPROM_TEMPERATURE_OFFSET, 4);
     eeprom_write_block(tmp, (void *) EEPROM_BACKUP_TEMPERATURE_OFFSET, 4);
@@ -3762,6 +3775,7 @@ void backup(char * arg) {
     configInject("backup mqttpwd\r");
     configInject("backup key\r");
     configInject("backup co2\r");
+    configInject("backup particulate\r");
     configInject("backup temp\r");
     configInject("backup hum\r");
     configInject("backup mac\r");
