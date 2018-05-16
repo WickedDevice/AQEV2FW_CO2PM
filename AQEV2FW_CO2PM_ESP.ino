@@ -27,7 +27,7 @@
 // semantic versioning - see http://semver.org/
 #define AQEV2FW_MAJOR_VERSION 2
 #define AQEV2FW_MINOR_VERSION 2
-#define AQEV2FW_PATCH_VERSION 3
+#define AQEV2FW_PATCH_VERSION 4
 
 #define WLAN_SEC_AUTO (10) // made up to support auto-config of security
 
@@ -88,11 +88,15 @@ boolean particulate_ready = false;
 void set_pm1p0_offset(char * arg);
 void set_pm2p5_offset(char * arg);
 void set_pm10p0_offset(char * arg);
+void begin_pm(char * arg);
 void test_pm(char * arg);
+void pmsen(char * arg);
 const char cmd_string_pm1p0_off[] PROGMEM   = "pm1p0_off  ";
 const char cmd_string_pm2p5_off[] PROGMEM   = "pm2p5_off  ";
 const char cmd_string_pm10p0_off[] PROGMEM  = "pm10p0_off ";
+const char cmd_string_beginpm[] PROGMEM     = "beginpm    ";
 const char cmd_string_testpm[] PROGMEM      = "testpm     ";
+const char cmd_string_pmsen[] PROGMEM       = "pmsen      ";
 SoftwareSerial co2Serial(9, 10);  // RX, TX
 K30 k30(&co2Serial);
 float co2_ppm = 0.0f;
@@ -509,7 +513,9 @@ PGM_P const commands[] PROGMEM = {
     cmd_string_pm1p0_off,
     cmd_string_pm2p5_off,
     cmd_string_pm10p0_off,
+    cmd_string_beginpm,
     cmd_string_testpm,
+    cmd_string_pmsen,
     cmd_string_co2_off,
     cmd_string_co2_blv,
 
@@ -561,7 +567,9 @@ void (*command_functions[])(char * arg) = {
     set_pm1p0_offset,
     set_pm2p5_offset,
     set_pm10p0_offset,
+    begin_pm,
     test_pm,
+    pmsen,
     set_co2_offset,
     co2_baseline_voltage_characterization_command,
 
@@ -1381,8 +1389,22 @@ void initializeHardware(void) {
     pinMode(A4, INPUT_PULLUP);
     pinMode(A7, INPUT_PULLUP);
     pinMode(A5, OUTPUT);
-    pmsx003_1.begin();
-    pmsx003_2.begin();
+    delay(20);
+    uint8_t ii = 0;
+    while(!pmsx003_1.begin()) {
+        if(ii == 3) {
+            break;
+        }
+        ii++;
+    };
+    ii = 0;
+    while(!pmsx003_2.begin()) {
+        if(ii == 3) {
+            break;
+        }
+        ii++;
+    }
+
     // this seems to be necessary
     // for CO2 software serial to work
     // must be some source of constructor
@@ -4016,12 +4038,27 @@ void set_pm10p0_offset(char * arg) {
     set_float_param(arg, (float *) EEPROM_PM10P0_CAL_OFFSET, 0);
 }
 
-void test_pm(char * arg) {
+void begin_pm(char * arg) {
+    char sen = *arg;
+    if(sen == 'a' || sen == 'A') {
+        pmsx003_1.begin();
+    } else if(sen == 'b' || sen == 'B') {
+        pmsx003_2.begin();
+    } else {
+        Serial.print(F("Error: Expected argument of 'a' or 'b', but got '"));
+        Serial.print(sen);
+        Serial.println("'");
+    }
+}
+
+void test_pm(char * arg, boolean silent) {
     char sen = *arg;
     if(sen == 'a' || sen == 'A') {
         if(!pmsx003_1.getSample(&instant_pm1p0_ugpm3_a, &instant_pm2p5_ugpm3_a, &instant_pm10p0_ugpm3_a)) {
-            Serial.println(F("PM Sensor A test failed"));
-        } else {
+            if(!silent) {
+                Serial.println(F("PM Sensor A test failed"));
+            }
+        } else if(!silent) {
             Serial.println(F("PM Sensor A test passed"));
             Serial.print(F("PM1.0 = "));
             Serial.println(instant_pm1p0_ugpm3_a, 2);
@@ -4032,8 +4069,10 @@ void test_pm(char * arg) {
         }
     } else if(sen == 'b' || sen == 'B') {
         if(!pmsx003_2.getSample(&instant_pm1p0_ugpm3_b, &instant_pm2p5_ugpm3_b, &instant_pm10p0_ugpm3_b)) {
-            Serial.println(F("PM Sensor B test failed"));
-        } else {
+            if(!silent) {
+                Serial.println(F("PM Sensor B test failed"));
+            }
+        } else if(!silent) {
             Serial.println(F("PM Sensor B test passed"));
             Serial.print(F("PM1.0 = "));
             Serial.println(instant_pm1p0_ugpm3_b, 2);
@@ -4042,9 +4081,25 @@ void test_pm(char * arg) {
             Serial.print(F(" PM10 = "));
             Serial.println(instant_pm10p0_ugpm3_b, 2);
         }
-    } else {
+    } else if(!silent) {
         Serial.print(F("Error: Expected argument of 'a' or 'b', but got '"));
         Serial.print(sen);
+        Serial.println("'");
+    }
+}
+
+void test_pm(char * arg) {
+    test_pm(arg, false);
+}
+
+void pmsen(char * arg) {
+    if(strcmp_P(arg, PSTR("reset")) == 0) {
+        digitalWrite(sensor_enable, LOW);
+        delay(1000);
+        digitalWrite(sensor_enable, HIGH);
+    } else {
+        Serial.print(F("Error: Expected argument of 'reset', but got '"));
+        Serial.print(arg);
         Serial.println("'");
     }
 }
@@ -6098,8 +6153,8 @@ void printCsvDataLine() {
         pm1p0_convert_to_ugpm3(pm1p0_moving_average, &compensated_value);
         pm1p0_ugpm3 = (pm1p0_ugpm3 + compensated_value) / 2;
 
-        Serial.print(pm1p0_moving_average, 1);
-        appendToString(pm1p0_moving_average, 1, dataString, &dataStringRemaining);
+        Serial.print(pm1p0_ugpm3, 1);
+        appendToString(pm1p0_ugpm3, 1, dataString, &dataStringRemaining);
 
         Serial.print(F(","));
         appendToString("," , dataString, &dataStringRemaining);
@@ -6111,8 +6166,8 @@ void printCsvDataLine() {
         pm2p5_convert_to_ugpm3(pm2p5_moving_average, &compensated_value);
         pm2p5_ugpm3 = (pm2p5_ugpm3 + compensated_value) / 2;
 
-        Serial.print(pm2p5_moving_average, 1);
-        appendToString(pm2p5_moving_average, 1, dataString, &dataStringRemaining);
+        Serial.print(pm2p5_ugpm3, 1);
+        appendToString(pm2p5_ugpm3, 1, dataString, &dataStringRemaining);
 
         Serial.print(F(","));
         appendToString("," , dataString, &dataStringRemaining);
@@ -6124,8 +6179,8 @@ void printCsvDataLine() {
         pm10p0_convert_to_ugpm3(pm10p0_moving_average, &compensated_value);
         pm10p0_ugpm3 = (pm10p0_ugpm3 + compensated_value) / 2;
 
-        Serial.print(pm10p0_moving_average, 1);
-        appendToString(pm10p0_moving_average, 1, dataString, &dataStringRemaining);
+        Serial.print(pm10p0_ugpm3, 1);
+        appendToString(pm10p0_ugpm3, 1, dataString, &dataStringRemaining);
     }
     else {
         Serial.print(F("---"));
